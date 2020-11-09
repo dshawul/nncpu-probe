@@ -20,7 +20,7 @@
 /*
 types and quantization
 */
-#if 1
+#if !defined(USE_FLOAT)
 
 #define SCALE_WEIGHT  64
 #define SCALE_ACT     127
@@ -30,8 +30,6 @@ typedef int8_t  weight_t;
 typedef int32_t bias_t;
 typedef int8_t  output_t;
 typedef int16_t input_weight_t;
-
-#define QUANTIZE       1
 
 #else
 
@@ -44,7 +42,6 @@ typedef float bias_t;
 typedef float output_t;
 typedef float input_weight_t;
 
-#define QUANTIZE       0
 #endif
 
 /*
@@ -89,6 +86,15 @@ INLINE void addVectors(
 }
 
 template<int n_input, typename T>
+INLINE void subVectors( 
+    T* __restrict const p1,
+    const T* __restrict const p2)
+{
+    for(int i = 0; i < n_input; i++)
+        p1[i] -= p2[i];
+}
+
+template<int n_input, typename T>
 INLINE void clampVector( T* const  p)
 {
 #define clamp(a, b, c) ((a) < (b) ? (b) : (a) > (c) ? (c) : (a))
@@ -108,7 +114,7 @@ INLINE void sigmoidVector( T* const  p)
 
 /*Compute dot product of two vectors.
   This may not parallelize well */
-#if !QUANTIZE
+#if defined(USE_FLOAT)
 
 template<int offsetRegs>
 INLINE __m256 fma32( __m256 acc, const float* p1, const float* p2 )
@@ -219,18 +225,26 @@ compute top heads for each player
 #define file64(x)        ((x) &  7)
 #define rank64(x)        ((x) >> 3)
 #define INVERT(x)        (((x) > 6) ? ((x) - 6) : ((x) + 6))
+#define KING(c)          ((c) ? bking : wking)
 
-INLINE void accumulate_input(
-    const int player,
-    const int* __restrict const pieces,
-    const int* __restrict const squares,
-    input_weight_t* __restrict const accumulator,
-    output_t* __restrict const output
-    ) {
-    
+#define INFLUENCE(op) {                                           \
+  if(flip_rank) {                                                 \
+      sq = MIRRORR64(sq);                                         \
+      pc = INVERT(pc);                                            \
+  }                                                               \
+  if(flip_file) {                                                 \
+      sq = MIRRORF64(sq);                                         \
+  }                                                               \
+  input_weight_t* const pinp = input_weights +                    \
+                  kidx*12*64*256 + (pc-1)*64*256 + sq*256;        \
+  op##Vectors<256,input_weight_t>(accumulation,pinp);             \
+}
+
+INLINE void recalculate_accumulator(int side, input_weight_t* const accumulation, Position* pos) 
+{
     //compute king index (0 to 31)
-    const bool flip_rank = (player == 1);
-    const unsigned ksq = squares[player];
+    const bool flip_rank = (side == 1);
+    const unsigned ksq = pos->squares[side];
     int f = file64(ksq);
     int r = rank64(ksq);
     const bool flip_file = (f < 4);
@@ -239,29 +253,96 @@ INLINE void accumulate_input(
     const unsigned kidx = (r * 4 + (f - 4));
 
     //initialize accumulater
-    memcpy(accumulator, input_biases, sizeof(input_biases));
+    memcpy(accumulation, input_biases, sizeof(input_biases));
 
     //add contributions of each piece
-    for(unsigned i = 0, pc; (pc = pieces[i]) != 0; i++) {
-        unsigned sq = squares[i];
-        if(flip_rank) {
-            sq = MIRRORR64(sq);
-            pc = INVERT(pc);
-        }
-        if(flip_file) {
-            sq = MIRRORF64(sq);
-        }
+    for(unsigned i = 0, pc; (pc = pos->pieces[i]) != 0; i++) {
+        unsigned sq = pos->squares[i];
+        INFLUENCE(add);
+    }
+}
 
-        input_weight_t* const pinp = input_weights + 
-                        kidx*12*64*256 + (pc-1)*64*256 + sq*256;
-        addVectors<256,input_weight_t>(accumulator,pinp);
+INLINE void update_accumulator(int side, input_weight_t* const accumulation, Position* pos, const DirtyPiece* const dp) 
+{
+    //compute king index (0 to 31)
+    const bool flip_rank = (side == 1);
+    const unsigned ksq = pos->squares[side];
+    int f = file64(ksq);
+    int r = rank64(ksq);
+    const bool flip_file = (f < 4);
+    if(flip_rank) r = 7 - r;
+    if(flip_file) f = 7 - f;
+    const unsigned kidx = (r * 4 + (f - 4));
+
+    //dirty piece loop
+    for (int i = 0; i < dp->dirtyNum; i++) {
+      unsigned pc, sq;
+
+      //delete from piece
+      pc = dp->pc[i];
+      sq = dp->from[i];
+      if (sq != 64) {
+        INFLUENCE(sub);
+      }
+
+      //add to piece
+      pc = dp->pc[i];
+      sq = dp->to[i];
+      if (sq != 64) {
+        INFLUENCE(add);
+      }
+    }
+}
+
+INLINE void INPUT_LAYER(Position *pos, output_t* const output)
+{
+    Accumulator* const accumulator = &(pos->nncpu[0]->accumulator);
+
+    //compute accumulator
+    if (!accumulator->computedAccumulation) {
+        Accumulator *pacc;
+        if (   (!pos->nncpu[1] || !(pacc = &pos->nncpu[1]->accumulator)->computedAccumulation)
+            && (!pos->nncpu[2] || !(pacc = &pos->nncpu[2]->accumulator)->computedAccumulation)
+        ) {
+            //if no previous accumulation, recalculate from scratch
+            for(unsigned side = 0; side < 2; side++)
+              recalculate_accumulator(side, accumulator->accumulation[side], pos);
+        } else {
+            //update accumulator
+            const DirtyPiece *dp = &(pos->nncpu[0]->dirtyPiece);
+            if(pos->nncpu[1]->accumulator.computedAccumulation) {
+              for(unsigned side = 0; side < 2; side++) {
+                  if(dp->pc[0] == (int)KING(side)) {
+                    recalculate_accumulator(side, accumulator->accumulation[side], pos);
+                  } else {
+                    memcpy(accumulator->accumulation[side],
+                      pacc->accumulation[side], sizeof(input_weight_t)*256);
+                    update_accumulator(side, accumulator->accumulation[side], pos, dp);
+                  }
+              }
+            } else {
+              const DirtyPiece *dp2 = &(pos->nncpu[1]->dirtyPiece);
+              for(unsigned side = 0; side < 2; side++) {
+                  if(dp->pc[0] == (int)KING(side) || dp2->pc[0] == (int)KING(side)) {
+                    recalculate_accumulator(side, accumulator->accumulation[side], pos);
+                  } else {
+                    memcpy(accumulator->accumulation[side],
+                      pacc->accumulation[side], sizeof(input_weight_t)*256);
+                    update_accumulator(side, accumulator->accumulation[side], pos, dp);
+                    update_accumulator(side, accumulator->accumulation[side], pos, dp2);
+                  }
+              }
+            }
+        }
     }
 
-    //activation
+    //assing scaled accumulation to output nodes
     for(unsigned i = 0; i < 256; i++)
-        output[i] = accumulator[i] / SCALE_WEIGHT;
+        output[i] = accumulator->accumulation[pos->player][i] / SCALE_WEIGHT;
+    for(unsigned i = 0; i < 256; i++)
+        output[i + 256] = accumulator->accumulation[1 - pos->player][i] / SCALE_WEIGHT;
 
-    clampVector<256,output_t>(output);
+    accumulator->computedAccumulation = 1;
 }
 
 /*
@@ -273,18 +354,17 @@ static INLINE float logit(float p) {
     return log((1 - p) / p) / (-0.00575646273);
 }
 
-DLLExport int _CDECL nncpu_evaluate(int player, int* pieces, int* squares)
+int nncpu_evaluate_pos(Position* pos)
 {
     //output_t
-    CACHE_ALIGN input_weight_t accumulator[2*256];
     CACHE_ALIGN output_t input_output[2*256];
     CACHE_ALIGN output_t hidden1_output[32];
     CACHE_ALIGN output_t hidden2_output[32];
     float score[1];
 
     //accumulate player and opponent heads
-    accumulate_input(player,pieces,squares,accumulator,input_output);
-    accumulate_input(1-player,pieces,squares,accumulator+256,input_output+256);
+    INPUT_LAYER(pos,input_output);
+    clampVector<512,output_t>(input_output);
 
     //three dense layers
     DENSE<512,32,output_t>(input_output,hidden1_weights,hidden1_biases,hidden1_output);
@@ -393,14 +473,39 @@ DLLExport void _CDECL nncpu_init(const char* path)
     fflush(stdout);
 }
 /*
-Incremental evaluation @todo
+Evaluate position
+*/
+DLLExport int _CDECL nncpu_evaluate(
+  int player, int* pieces, int* squares)
+{
+  NNCPUdata nncpu;
+  nncpu.accumulator.computedAccumulation = 0;
+
+  Position pos;
+  pos.nncpu[0] = &nncpu;
+  pos.nncpu[1] = 0;
+  pos.nncpu[2] = 0;
+  pos.player = player;
+  pos.pieces = pieces;
+  pos.squares = squares;
+  return nncpu_evaluate_pos(&pos);
+}
+/*
+Incremental evaluation
 */
 DLLExport int _CDECL nncpu_evaluate_incremental(
   int player, int* pieces, int* squares, NNCPUdata** nncpu)
 {
   assert(nncpu[0] && uint64_t(&nncpu[0]->accumulator) % 64 == 0);
 
-  return nncpu_evaluate(player,pieces,squares);
+  Position pos;
+  pos.nncpu[0] = nncpu[0];
+  pos.nncpu[1] = nncpu[1];
+  pos.nncpu[2] = nncpu[2];
+  pos.player = player;
+  pos.pieces = pieces;
+  pos.squares = squares;
+  return nncpu_evaluate_pos(&pos);
 }
 /*
 Evaluate FEN

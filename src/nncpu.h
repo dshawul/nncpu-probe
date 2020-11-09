@@ -46,7 +46,11 @@ typedef struct DirtyPiece {
 } DirtyPiece;
 
 typedef struct Accumulator {
+#if defined(USE_FLOAT)
+  alignas(64) float accumulation[2][256];
+#else
   alignas(64) int16_t accumulation[2][256];
+#endif
   int computedAccumulation;
 } Accumulator;
 
@@ -55,6 +59,18 @@ typedef struct NNCPUdata {
   DirtyPiece dirtyPiece;
 } NNCPUdata;
 
+/**
+* position data structure passed to core subroutines
+*  See @nncpu_evaluate for a description of parameters
+*/
+typedef struct Position {
+  int player;
+  int* pieces;
+  int* squares;
+  NNCPUdata* nncpu[3];
+} Position;
+
+int nncpu_evaluate_pos(Position* pos);
 /************************************************************************
 *         EXTERNAL INTERFACES
 *

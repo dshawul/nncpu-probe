@@ -12,6 +12,7 @@ HPP = nncpu.h
 # Disable/Add flags as needed
 ############################
 DEFINES =
+#DEFINES += -DUSE_FLOAT
 ifeq ($(COMP),$(filter $(COMP),gcc clang win icpc))
   DEFINES += -DUSE_AVX2 -mfma -mavx2 -msse4.1 -msse3 -msse2 -msse
 endif
