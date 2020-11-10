@@ -105,13 +105,6 @@ INLINE void clampVector( T* const  p)
 #undef clamp
 }
 
-template<int n_input, typename T>
-INLINE void sigmoidVector( T* const  p)
-{
-    for(int i = 0; i < n_input; i++)
-        p[i] = 1 / (1 + exp(-float(p[i]) / SCALE_ACT));
-}
-
 /*Compute dot product of two vectors.
   This may not parallelize well */
 #if defined(USE_FLOAT)
@@ -227,6 +220,7 @@ compute top heads for each player
 #define INVERT(x)        (((x) > 6) ? ((x) - 6) : ((x) + 6))
 #define KING(c)          ((c) ? bking : wking)
 
+//add/subtract influence of input node
 #define INFLUENCE(op) {                                           \
   if(flip_rank) {                                                 \
       sq = MIRRORR64(sq);                                         \
@@ -240,17 +234,25 @@ compute top heads for each player
   op##Vectors<256,input_weight_t>(accumulation,pinp);             \
 }
 
-INLINE void recalculate_accumulator(int side, input_weight_t* const accumulation, Position* pos) 
-{
-    //compute king index (0 to 31)
-    const bool flip_rank = (side == 1);
-    const unsigned ksq = pos->squares[side];
-    int f = file64(ksq);
-    int r = rank64(ksq);
-    const bool flip_file = (f < 4);
-    if(flip_rank) r = 7 - r;
-    if(flip_file) f = 7 - f;
+//compute king index (0 to 31)
+#define KINDEX()                                                  \
+    const bool flip_rank = (side == 1);                           \
+    const unsigned ksq = pos->squares[side];                      \
+    int f = file64(ksq);                                          \
+    int r = rank64(ksq);                                          \
+    const bool flip_file = (f < 4);                               \
+    if(flip_rank) r = 7 - r;                                      \
+    if(flip_file) f = 7 - f;                                      \
     const unsigned kidx = (r * 4 + (f - 4));
+
+/*
+Recompute accumulator from scratch
+*/
+INLINE void recalculate_accumulator(int side, input_weight_t* const accumulation,
+  Position* pos)
+{
+    //king index
+    KINDEX();
 
     //initialize accumulater
     memcpy(accumulation, input_biases, sizeof(input_biases));
@@ -261,18 +263,14 @@ INLINE void recalculate_accumulator(int side, input_weight_t* const accumulation
         INFLUENCE(add);
     }
 }
-
-INLINE void update_accumulator(int side, input_weight_t* const accumulation, Position* pos, const DirtyPiece* const dp) 
+/*
+Update accumulator from history of moves
+*/
+INLINE void update_accumulator(int side, input_weight_t* const accumulation,
+  Position* pos, const DirtyPiece* const dp)
 {
-    //compute king index (0 to 31)
-    const bool flip_rank = (side == 1);
-    const unsigned ksq = pos->squares[side];
-    int f = file64(ksq);
-    int r = rank64(ksq);
-    const bool flip_file = (f < 4);
-    if(flip_rank) r = 7 - r;
-    if(flip_file) f = 7 - f;
-    const unsigned kidx = (r * 4 + (f - 4));
+    //king index
+    KINDEX();
 
     //dirty piece loop
     for (int i = 0; i < dp->dirtyNum; i++) {
@@ -293,7 +291,9 @@ INLINE void update_accumulator(int side, input_weight_t* const accumulation, Pos
       }
     }
 }
-
+/*
+Input layer computation
+*/
 INLINE void INPUT_LAYER(Position *pos, output_t* const output)
 {
     Accumulator* const accumulator = &(pos->nncpu[0]->accumulator);
@@ -344,23 +344,16 @@ INLINE void INPUT_LAYER(Position *pos, output_t* const output)
 
     accumulator->computedAccumulation = 1;
 }
-
 /*
 evaluate net
 */
-static INLINE float logit(float p) {
-    if(p < 1e-15) p = 1e-15;
-    else if(p > 1 - 1e-15) p = 1 - 1e-15;
-    return log((1 - p) / p) / (-0.00575646273);
-}
-
 int nncpu_evaluate_pos(Position* pos)
 {
     //output_t
     CACHE_ALIGN output_t input_output[2*256];
     CACHE_ALIGN output_t hidden1_output[32];
     CACHE_ALIGN output_t hidden2_output[32];
-    float score[1];
+    bias_t score[1];
 
     //accumulate player and opponent heads
     INPUT_LAYER(pos,input_output);
@@ -371,12 +364,10 @@ int nncpu_evaluate_pos(Position* pos)
     clampVector<32,output_t>(hidden1_output);
     DENSE<32,32,output_t>(hidden1_output,hidden2_weights,hidden2_biases,hidden2_output);
     clampVector<32,output_t>(hidden2_output);
-    DENSE<32,1,float>(hidden2_output,output_weights,output_biases,score);
-    sigmoidVector<1,float>(score);
+    DENSE<32,1,bias_t>(hidden2_output,output_weights,output_biases,score);
 
-    return logit(score[0]);
+    return score[0] / (0.00575646273 * SCALE_ACT);
 }
-
 /*
 Read bytes in little endian byte order
 */
@@ -450,7 +441,6 @@ static void read_network(FILE* f)
         output_biases[i] = (bias_t)value;
     }
 }
-
 /*
 init net
 */
@@ -508,7 +498,7 @@ DLLExport int _CDECL nncpu_evaluate_incremental(
   return nncpu_evaluate_pos(&pos);
 }
 /*
-Evaluate FEN
+Decode fen
 */
 static const char piece_name[] = "_KQRBNPkqrbnp_";
 static const char rank_name[] = "12345678";
@@ -516,7 +506,7 @@ static const char file_name[] = "abcdefgh";
 static const char col_name[] = "WwBb";
 static const char cas_name[] = "KQkq";
 
-void decode_fen(const char* fen_str, int* player, int* castle,
+static void decode_fen(const char* fen_str, int* player, int* castle,
        int* fifty, int* move_number, int* piece, int* square)
 {
   /*decode fen*/
@@ -590,7 +580,9 @@ void decode_fen(const char* fen_str, int* player, int* castle,
       *move_number = 1;
   }
 }
-
+/*
+Evaluate fen
+*/
 DLLExport int _CDECL nncpu_evaluate_fen(const char* fen)
 {
   int pieces[33],squares[33],player,castle,fifty,move_number;
