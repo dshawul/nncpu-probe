@@ -94,13 +94,15 @@ INLINE void subVectors(
         p1[i] -= p2[i];
 }
 
-template<int n_input, typename T>
-INLINE void clampVector( T* const  p)
+template<int n_input, typename IT, typename T>
+INLINE void clampVector(
+  const IT* __restrict const ip,
+  T* __restrict const  p)
 {
 #define clamp(a, b, c) ((a) < (b) ? (b) : (a) > (c) ? (c) : (a))
 
     for(int i = 0; i < n_input; i++)
-        p[i] = clamp(p[i],0,SCALE_ACT);
+        p[i] = clamp(ip[i] / SCALE_WEIGHT,0,SCALE_ACT);
 
 #undef clamp
 }
@@ -195,19 +197,17 @@ int32_t dotProduct( const int8_t* p1, const int8_t* p2)
 /*
 Dense layer
 */
-template<int n_input, int n_output, typename T>
+template<int n_input, int n_output>
 void DENSE(
     const output_t* __restrict const input,
     const weight_t* __restrict const weights,
     const bias_t* __restrict const biases,
-    T* __restrict const output
+    bias_t* __restrict const output
     )
 {
-    for(unsigned i = 0; i < n_output; i++) {
-        bias_t sum = biases[i];
-        sum += dotProduct<n_input>(input,weights + i * n_input);
-        output[i] = sum / SCALE_WEIGHT;
-    }
+    memcpy(output, biases, n_output * sizeof(bias_t));
+    for(unsigned i = 0; i < n_output; i++)
+        output[i] += dotProduct<n_input>(input,weights + i * n_input);
 }
 
 /*
@@ -337,10 +337,8 @@ INLINE void INPUT_LAYER(Position *pos, output_t* const output)
     }
 
     //assing scaled accumulation to output nodes
-    for(unsigned i = 0; i < 256; i++)
-        output[i] = accumulator->accumulation[pos->player][i] / SCALE_WEIGHT;
-    for(unsigned i = 0; i < 256; i++)
-        output[i + 256] = accumulator->accumulation[1 - pos->player][i] / SCALE_WEIGHT;
+    clampVector<256,input_weight_t,output_t>(accumulator->accumulation[pos->player],output);
+    clampVector<256,input_weight_t,output_t>(accumulator->accumulation[1 - pos->player],output + 256);
 
     accumulator->computedAccumulation = 1;
 }
@@ -353,20 +351,20 @@ int nncpu_evaluate_pos(Position* pos)
     CACHE_ALIGN output_t input_output[2*256];
     CACHE_ALIGN output_t hidden1_output[32];
     CACHE_ALIGN output_t hidden2_output[32];
+    CACHE_ALIGN bias_t temp[32];
     bias_t score[1];
 
     //accumulate player and opponent heads
     INPUT_LAYER(pos,input_output);
-    clampVector<512,output_t>(input_output);
 
     //three dense layers
-    DENSE<512,32,output_t>(input_output,hidden1_weights,hidden1_biases,hidden1_output);
-    clampVector<32,output_t>(hidden1_output);
-    DENSE<32,32,output_t>(hidden1_output,hidden2_weights,hidden2_biases,hidden2_output);
-    clampVector<32,output_t>(hidden2_output);
-    DENSE<32,1,bias_t>(hidden2_output,output_weights,output_biases,score);
+    DENSE<512,32>(input_output,hidden1_weights,hidden1_biases,temp);
+    clampVector<32,bias_t,output_t>(temp,hidden1_output);
+    DENSE<32,32>(hidden1_output,hidden2_weights,hidden2_biases,temp);
+    clampVector<32,bias_t,output_t>(temp,hidden2_output);
+    DENSE<32,1>(hidden2_output,output_weights,output_biases,score);
 
-    return score[0] / (0.00575646273 * SCALE_ACT);
+    return score[0] / (0.00575646273 * SCALE_BIAS);
 }
 /*
 Read bytes in little endian byte order
