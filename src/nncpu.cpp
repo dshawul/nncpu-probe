@@ -22,9 +22,10 @@ types and quantization
 */
 #if !defined(USE_FLOAT)
 
-#define SCALE_WEIGHT  64
-#define SCALE_ACT     127
-#define SCALE_BIAS    (SCALE_WEIGHT*SCALE_ACT)
+#define SCALE_WEIGHT_SHIFT  6
+#define SCALE_WEIGHT        (1 << SCALE_WEIGHT_SHIFT)
+#define SCALE_ACT           127
+#define SCALE_BIAS          (SCALE_WEIGHT*SCALE_ACT)
 
 typedef int8_t  weight_t;
 typedef int32_t bias_t;
@@ -33,9 +34,10 @@ typedef int16_t input_weight_t;
 
 #else
 
-#define SCALE_WEIGHT  1
-#define SCALE_ACT     1
-#define SCALE_BIAS    (SCALE_WEIGHT*SCALE_ACT)
+#define SCALE_WEIGHT_SHIFT  0
+#define SCALE_WEIGHT        1
+#define SCALE_ACT           1
+#define SCALE_BIAS          1
 
 typedef float weight_t;
 typedef float bias_t;
@@ -72,53 +74,128 @@ CACHE_ALIGN static bias_t hidden2_biases[32];
 CACHE_ALIGN static weight_t output_weights[1*32];              //order: [N_out][N_inp]
 CACHE_ALIGN static bias_t output_biases[1];
 
+/****************************
+* FP32 AVX 
+*****************************/
+#if defined(USE_FLOAT)
 
-/*Basic vector operations that vectorize well
-  without simd intrinsics
-  */
+//add
+#if defined(USE_AVX2)
+template<int offsetRegs>
+INLINE void add32(float* p1, const float* p2)
+{
+    constexpr int lanes = offsetRegs * 8;
+    __m256 *a = (__m256 *)(p1 + lanes);
+    __m256 *b = (__m256 *)(p2 + lanes);
+    a[0] = _mm256_add_ps(a[0], b[0]);
+}
+#endif
+
 template<int n_input, typename T>
 INLINE void addVectors( 
-    T* __restrict const p1,
-    const T* __restrict const p2)
+    T* __restrict  p1,
+    const T* __restrict  p2)
 {
+#if !defined(USE_AVX2)
     for(int i = 0; i < n_input; i++)
         p1[i] += p2[i];
+#else
+    for (int i = 0; i < n_input; i += 32)
+    {
+        add32<0>(p1, p2);
+        add32<1>(p1, p2);
+        add32<2>(p1, p2);
+        add32<3>(p1, p2);
+        p1 += 32;
+        p2 += 32;
+    }
+#endif
 }
+
+//subtract
+#if defined(USE_AVX2)
+template<int offsetRegs>
+INLINE void sub32(float* p1, const float* p2)
+{
+    constexpr int lanes = offsetRegs * 8;
+    __m256 *a = (__m256 *)(p1 + lanes);
+    __m256 *b = (__m256 *)(p2 + lanes);
+    a[0] = _mm256_sub_ps(a[0], b[0]);
+}
+#endif
 
 template<int n_input, typename T>
 INLINE void subVectors( 
-    T* __restrict const p1,
-    const T* __restrict const p2)
+    T* __restrict  p1,
+    const T* __restrict  p2)
 {
+#if !defined(USE_AVX2)
     for(int i = 0; i < n_input; i++)
         p1[i] -= p2[i];
+#else
+    for (int i = 0; i < n_input; i += 32)
+    {
+        sub32<0>(p1, p2);
+        sub32<1>(p1, p2);
+        sub32<2>(p1, p2);
+        sub32<3>(p1, p2);
+        p1 += 32;
+        p2 += 32;
+    }
+#endif
 }
+
+//clamp
+#if defined(USE_AVX2)
+template<int offsetRegs>
+INLINE void clamp32(const float* p1, float* p2)
+{
+    constexpr int lanes = offsetRegs * 8;
+    __m256 *a = (__m256 *)(p1 + lanes);
+    __m256 *b = (__m256 *)(p2 + lanes);
+    const __m256 zero = _mm256_setzero_ps();
+    const __m256 maxv = _mm256_set1_ps(SCALE_ACT);
+    b[0] = _mm256_min_ps(_mm256_max_ps(a[0], zero), maxv);
+}
+#endif
 
 template<int n_input, typename IT, typename T>
 INLINE void clampVector(
-  const IT* __restrict const ip,
-  T* __restrict const  p)
+  const IT* __restrict p1,
+  T* __restrict p2)
 {
+
+#if !defined(USE_AVX2)
+
 #define clamp(a, b, c) ((a) < (b) ? (b) : (a) > (c) ? (c) : (a))
-
     for(int i = 0; i < n_input; i++)
-        p[i] = clamp(ip[i] / SCALE_WEIGHT,0,SCALE_ACT);
-
+        p2[i] = clamp(p1[i],0,SCALE_ACT);
 #undef clamp
+
+#else
+    for (int i = 0; i < n_input; i += 32)
+    {
+        clamp32<0>(p1, p2);
+        clamp32<1>(p1, p2);
+        clamp32<2>(p1, p2);
+        clamp32<3>(p1, p2);
+        p1 += 32;
+        p2 += 32;
+    }
+#endif
 }
 
-/*Compute dot product of two vectors.
-  This may not parallelize well */
-#if defined(USE_FLOAT)
-
+//dot product
+#if defined(USE_AVX2)
 template<int offsetRegs>
 INLINE __m256 fma32( __m256 acc, const float* p1, const float* p2 )
 {
     constexpr int lanes = offsetRegs * 8;
-    const __m256 a = _mm256_load_ps( p1 + lanes );
-    const __m256 b = _mm256_load_ps( p2 + lanes );
-    return _mm256_fmadd_ps( a, b, acc );
+    __m256 *a = (__m256 *)(p1 + lanes);
+    __m256 *b = (__m256 *)(p2 + lanes);
+    return _mm256_fmadd_ps( a[0], b[0], acc );
 }
+#endif
 
 template<int n_input>
 float dotProduct( const float* p1, const float* p2)
@@ -156,8 +233,160 @@ float dotProduct( const float* p1, const float* p2)
 #endif
 }
 
+/****************************
+* INT8 AVX 
+*****************************/
 #else
 
+//add
+#if defined(USE_AVX2)
+template<int offsetRegs>
+INLINE void add8(int16_t* p1, const int16_t* p2)
+{
+    constexpr int lanes = offsetRegs * 16;
+    __m256i *a = (__m256i *)(p1 + lanes);
+    __m256i *b = (__m256i *)(p2 + lanes);
+    a[0] = _mm256_add_epi16(a[0], b[0]);
+}
+#endif
+
+template<int n_input, typename T>
+INLINE void addVectors( 
+    T* __restrict  p1,
+    const T* __restrict  p2)
+{
+#if !defined(USE_AVX2)
+    for(int i = 0; i < n_input; i++)
+        p1[i] += p2[i];
+#else
+    for (int i = 0; i < n_input; i += 64)
+    {
+        add8<0>(p1, p2);
+        add8<1>(p1, p2);
+        add8<2>(p1, p2);
+        add8<3>(p1, p2);
+        p1 += 64;
+        p2 += 64;
+    }
+#endif
+}
+
+//subtract
+#if defined(USE_AVX2)
+template<int offsetRegs>
+INLINE void sub8(int16_t* p1, const int16_t* p2)
+{
+    constexpr int lanes = offsetRegs * 16;
+    __m256i *a = (__m256i *)(p1 + lanes);
+    __m256i *b = (__m256i *)(p2 + lanes);
+    a[0] = _mm256_sub_epi16(a[0], b[0]);
+}
+#endif
+
+template<int n_input, typename T>
+INLINE void subVectors( 
+    T* __restrict  p1,
+    const T* __restrict  p2)
+{
+#if !defined(USE_AVX2)
+    for(int i = 0; i < n_input; i++)
+        p1[i] -= p2[i];
+#else
+    for (int i = 0; i < n_input; i += 64)
+    {
+        sub8<0>(p1, p2);
+        sub8<1>(p1, p2);
+        sub8<2>(p1, p2);
+        sub8<3>(p1, p2);
+        p1 += 64;
+        p2 += 64;
+    }
+#endif
+}
+
+//clamp
+#if defined(USE_AVX2)
+template<int offsetRegs>
+INLINE void clamp32to8(const int32_t* p1, int8_t* p2)
+{
+  constexpr int lanes = offsetRegs * 8 * 4;
+  __m256i *a = (__m256i *)(p1 + lanes);
+  __m256i *b = (__m256i *)(p2 + lanes);
+  const __m256i zero = _mm256_setzero_si256();
+  const __m256i control = _mm256_set_epi32(7, 3, 6, 2, 5, 1, 4, 0);
+  __m256i r1  = _mm256_srai_epi16(
+      _mm256_packs_epi32(a[0],a[1]), SCALE_WEIGHT_SHIFT);
+  __m256i r2  = _mm256_srai_epi16(
+      _mm256_packs_epi32(a[2],a[3]), SCALE_WEIGHT_SHIFT);
+  b[0] = _mm256_permutevar8x32_epi32(
+      _mm256_max_epi8(_mm256_packs_epi16(r1, r2), zero), control);
+}
+#endif
+
+template<int n_input, typename IT, typename T>
+INLINE void clampVector (
+  const int32_t* __restrict p1,
+  T* __restrict p2)
+{
+#if !defined(USE_AVX2)
+
+#define clamp(a, b, c) ((a) < (b) ? (b) : (a) > (c) ? (c) : (a))
+    for(int i = 0; i < n_input; i++)
+        p2[i] = clamp((p1[i] >> SCALE_WEIGHT_SHIFT),0,SCALE_ACT);
+#undef clamp
+
+#else
+    for (int i = 0; i < n_input; i += 32)
+    {
+        clamp32to8<0>(p1, p2);
+        p1 += 32;
+        p2 += 32;
+    }
+#endif
+}
+
+//clamp for input layer does no shift
+#if defined(USE_AVX2)
+template<int offsetRegs>
+INLINE void clamp16to8(const int16_t* p1, int8_t* p2)
+{
+  constexpr int lanes = offsetRegs * 16 * 2;
+  constexpr int control = 0b11011000;
+  const __m256i zero = _mm256_setzero_si256();
+  __m256i *a = (__m256i *)(p1 + lanes);
+  __m256i *b = (__m256i *)(p2 + lanes);
+  __m256i a0 = _mm256_srai_epi16(a[0], SCALE_WEIGHT_SHIFT);
+  __m256i a1 = _mm256_srai_epi16(a[1], SCALE_WEIGHT_SHIFT);
+  b[0] =  _mm256_permute4x64_epi64(_mm256_max_epi8(
+      _mm256_packs_epi16(a0, a1), zero), control);
+}
+#endif
+
+template<int n_input, typename IT, typename T>
+INLINE void clampVector (
+  const int16_t* __restrict p1,
+  T* __restrict p2)
+{
+#if !defined(USE_AVX2)
+
+#define clamp(a, b, c) ((a) < (b) ? (b) : (a) > (c) ? (c) : (a))
+    for(int i = 0; i < n_input; i++)
+        p2[i] = clamp((p1[i] >> SCALE_WEIGHT_SHIFT),0,SCALE_ACT);
+#undef clamp
+
+#else
+    for (int i = 0; i < n_input; i += 64)
+    {
+        clamp16to8<0>(p1, p2);
+        clamp16to8<1>(p1, p2);
+        p1 += 64;
+        p2 += 64;
+    }
+#endif
+}
+
+//dot product
+#if defined(USE_AVX2)
 template<int offsetRegs>
 INLINE __m256i fma8( const int8_t* p1, const int8_t* p2 )
 {
@@ -168,6 +397,7 @@ INLINE __m256i fma8( const int8_t* p1, const int8_t* p2 )
     prod = _mm256_madd_epi16(prod, _mm256_set1_epi16(1));
     return prod;
 }
+#endif
 
 template<int n_input>
 int32_t dotProduct( const int8_t* p1, const int8_t* p2)
@@ -193,6 +423,9 @@ int32_t dotProduct( const int8_t* p1, const int8_t* p2)
 }
 
 #endif
+/****************************
+* END AVX 
+*****************************/
 
 /*
 Dense layer
@@ -364,7 +597,7 @@ int nncpu_evaluate_pos(Position* pos)
     clampVector<32,bias_t,output_t>(temp,hidden2_output);
     DENSE<32,1>(hidden2_output,output_weights,output_biases,score);
 
-    return score[0] / (0.00575646273 * SCALE_BIAS);
+    return (int)(score[0] / (0.00575646273 * SCALE_BIAS));
 }
 /*
 Read bytes in little endian byte order
