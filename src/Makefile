@@ -3,8 +3,8 @@
 ############################
 EXE = libnncpuprobe.so
 RM = rm -rf
-OBJ = nncpu.o
-HPP = nncpu.h
+OBJ = nncpu.o misc.o
+HPP = nncpu.h misc.h simd.h
 
 ############################
 # SIMD flags
