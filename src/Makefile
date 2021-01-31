@@ -12,6 +12,7 @@ HPP = nncpu.h misc.h simd.h
 # Disable/Add flags as needed
 ############################
 DEFINES =
+DEFINES += -DSTOCK
 #DEFINES += -DUSE_FLOAT
 ifeq ($(COMP),$(filter $(COMP),gcc clang win icpc))
   DEFINES += -DUSE_AVX2

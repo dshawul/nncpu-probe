@@ -58,7 +58,11 @@ weights and biases
 */
 #define CACHE_ALIGN alignas(64)
 
-CACHE_ALIGN static input_weight_t input_weights[32*12*64*256]; //order: [N_inp][N_out]
+#ifdef STOCK
+CACHE_ALIGN static input_weight_t input_weights[64*(10*64+1)*256]; //order: [N_inp][N_out]
+#else
+CACHE_ALIGN static input_weight_t input_weights[32*(12*64)*256];   //order: [N_inp][N_out]
+#endif
 CACHE_ALIGN static input_weight_t input_biases[256];
 
 CACHE_ALIGN static weight_t hidden1_weights[32*512];           //order: [N_out][N_inp]
@@ -89,12 +93,45 @@ void DENSE(
 /*
 compute top heads for each player
 */
+#ifdef STOCK
+
+//mapping tables
+enum {
+  PS_W_PAWN,   PS_B_PAWN,
+  PS_W_KNIGHT, PS_B_KNIGHT,
+  PS_W_BISHOP, PS_B_BISHOP,
+  PS_W_ROOK,   PS_B_ROOK,
+  PS_W_QUEEN,  PS_B_QUEEN,
+};
+
+uint32_t piece_map[2][14] = {
+  { 0, 0, PS_W_QUEEN, PS_W_ROOK, PS_W_BISHOP, PS_W_KNIGHT, PS_W_PAWN,
+       0, PS_B_QUEEN, PS_B_ROOK, PS_B_BISHOP, PS_B_KNIGHT, PS_B_PAWN, 0},
+  { 0, 0, PS_B_QUEEN, PS_B_ROOK, PS_B_BISHOP, PS_B_KNIGHT, PS_B_PAWN,
+       0, PS_W_QUEEN, PS_W_ROOK, PS_W_BISHOP, PS_W_KNIGHT, PS_W_PAWN, 0}
+};
+
+//add/subtract influence of input node
+#define INFLUENCE(op) {                                           \
+  if(flip_rank) sq = sq ^ 0x3f;                                   \
+  input_weight_t* const pinp = input_weights +                    \
+        (kidx * 641 + (piece_map[side][pc]*64+1) + sq) * 256;     \
+  op##Vectors<256,input_weight_t>(accumulation,pinp);             \
+}
+
+//compute king index (0 to 63)
+#define KINDEX()                                                  \
+    const bool flip_rank = (side == 1);                           \
+    const unsigned ksq = pos->squares[side];                      \
+    const unsigned kidx = (flip_rank ? (ksq ^ 0x3f) : ksq);
+
+#else //STOCK
+
 #define MIRRORF64(sq)    ((sq) ^ 007)
 #define MIRRORR64(sq)    ((sq) ^ 070)
 #define file64(x)        ((x) &  7)
 #define rank64(x)        ((x) >> 3)
 #define INVERT(x)        (((x) > 6) ? ((x) - 6) : ((x) + 6))
-#define KING(c)          ((c) ? bking : wking)
 
 //add/subtract influence of input node
 #define INFLUENCE(op) {                                           \
@@ -106,7 +143,7 @@ compute top heads for each player
       sq = MIRRORF64(sq);                                         \
   }                                                               \
   input_weight_t* const pinp = input_weights +                    \
-                  kidx*12*64*256 + (pc-1)*64*256 + sq*256;        \
+                (kidx*(12*64) + (pc-1)*64 + sq) * 256;            \
   op##Vectors<256,input_weight_t>(accumulation,pinp);             \
 }
 
@@ -121,6 +158,8 @@ compute top heads for each player
     if(flip_file) f = 7 - f;                                      \
     const unsigned kidx = (r * 4 + (f - 4));
 
+#endif //STOCK
+
 /*
 Recompute accumulator from scratch
 */
@@ -134,7 +173,11 @@ INLINE void recalculate_accumulator(int side, input_weight_t* const accumulation
     memcpy(accumulation, input_biases, sizeof(input_biases));
 
     //add contributions of each piece
+#ifdef STOCK
+    for(unsigned i = 2, pc; (pc = pos->pieces[i]) != 0; i++) {
+#else
     for(unsigned i = 0, pc; (pc = pos->pieces[i]) != 0; i++) {
+#endif
         unsigned sq = pos->squares[i];
         INFLUENCE(add);
     }
@@ -154,6 +197,10 @@ INLINE void update_accumulator(int side, input_weight_t* const accumulation,
 
       //delete from piece
       pc = dp->pc[i];
+#ifdef STOCK
+      if(pc == wking || pc == bking)
+        continue;
+#endif
       sq = dp->from[i];
       if (sq != 64) {
         INFLUENCE(sub);
@@ -170,6 +217,8 @@ INLINE void update_accumulator(int side, input_weight_t* const accumulation,
 /*
 Input layer computation
 */
+#define KING(c) ((c) ? bking : wking)
+
 INLINE void INPUT_LAYER(Position *pos, output_t* const output)
 {
     Accumulator* const accumulator = &(pos->nncpu[0]->accumulator);
@@ -240,7 +289,11 @@ int nncpu_evaluate_pos(Position* pos)
     clampVector<32,bias_t,output_t>(temp,hidden2_output);
     DENSE<32,1>(hidden2_output,output_weights,output_biases,score);
 
+#ifdef STOCK
+    return (int)(score[0] / 16.0);
+#else
     return (int)(score[0] / (0.00575646273 * SCALE_BIAS));
+#endif
 }
 /*
 Evaluate position
@@ -289,6 +342,19 @@ DLLExport int _CDECL nncpu_evaluate_fen(const char* fen)
 /*
 Read bytes in little endian byte order
 */
+#ifdef STOCK
+static uint32_t read_bytes(int count,FILE* f) {
+    uint32_t x = 0;
+    uint8_t* c = (uint8_t*) &x;
+    for(int i = 0; i < count; i++)
+        c[i] = ((uint8_t) fgetc(f));
+    return x;
+}
+static void skip_bytes(int count,FILE* f) {
+    for(int i = 0; i < count; i++)
+        fgetc(f);
+}
+#else
 static float read_bytes(int count,FILE* f) {
     uint32_t x = 0;
     uint8_t* c = (uint8_t*) &x;
@@ -297,11 +363,71 @@ static float read_bytes(int count,FILE* f) {
     float* p = (float*) &x;
     return *p;
 }
+#endif
 /*
 Read weights.
    shuffle order of weights for best cache performance
 */
-static void read_network(FILE* f)
+#ifdef STOCK
+static bool read_network(FILE* f)
+{
+    uint32_t val;
+
+    //header
+    val = read_bytes(sizeof(int),f);
+    if(val != 0x7AF32F16u) return false;
+
+    val = read_bytes(sizeof(int),f);
+    if(val != 0x3e5aa6eeU) return false;
+
+    val = read_bytes(sizeof(int),f);
+    if(val != 177) return false;
+
+    skip_bytes(177,f);
+
+    //------- transformer ---------
+    val = read_bytes(sizeof(int),f);
+    if(val != 0x5d69d7b8) return false;
+
+    //read input weights and biases
+    for(int i = 0; i < 256; i++)
+        input_biases[i] = read_bytes(sizeof(uint16_t), f);
+    for(int i = 0; i < 64 * 641 * 256; i++)
+        input_weights[i] = read_bytes(sizeof(uint16_t), f);
+
+    //-------- dense network 512x32x32x1 ----------
+    val = read_bytes(sizeof(int),f);
+    if(val != 0x63337156) return false;
+
+    //read hidden1 weights and biases
+    for(int i = 0; i < 32; i++)
+        hidden1_biases[i] = read_bytes(sizeof(uint32_t), f);
+    for(int i = 0; i < 32; i++) {
+        for(int j = 0; j < 512; j++) {
+            hidden1_weights[i*512 + j] = read_bytes(sizeof(uint8_t), f);
+        }
+    }
+    //read hidden2 weights and biases
+    for(int i = 0; i < 32; i++)
+        hidden2_biases[i] = read_bytes(sizeof(uint32_t), f);
+    for(int i = 0; i < 32; i++) {
+        for(int j = 0; j < 32; j++) {
+            hidden2_weights[i*32 + j] = read_bytes(sizeof(uint8_t), f);
+        }
+    }
+    //read output weights and biases
+    for(int i = 0; i < 1; i++)
+        output_biases[i] = read_bytes(sizeof(uint32_t), f);
+    for(int i = 0; i < 32; i++) {
+        for(int j = 0; j < 1; j++) {
+            output_weights[i*1 + j] = read_bytes(sizeof(uint8_t), f);
+        }
+    }
+
+    return true;
+}
+#else
+static bool read_network(FILE* f)
 {
     //version number
     read_bytes(sizeof(int),f);
@@ -358,7 +484,10 @@ static void read_network(FILE* f)
         float value = read_bytes(sizeof(float), f) * SCALE_BIAS;
         output_biases[i] = (bias_t)value;
     }
+
+    return true;
 }
+#endif
 /*
 init net
 */
@@ -366,15 +495,19 @@ DLLExport void _CDECL nncpu_init(const char* path)
 {
     FILE* f = fopen(path, "rb");
     if(!f) {
-        printf("NNCPU file not found!\n");
+        printf("*******  NNCPU file not found! *******\n");
         fflush(stdout);
         return;
     } else {
         printf("Loading NNCPU : %s\n", path);
         fflush(stdout);
     }
-
-    read_network(f);
+    if(!read_network(f)) {
+       fclose(f);
+       printf("********* Network failed to load properly! *******\n");
+       fflush(stdout);
+       return;
+    }
     fclose(f);
 
     printf("NNCPU loaded !\n");
