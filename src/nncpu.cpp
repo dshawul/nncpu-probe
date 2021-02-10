@@ -59,9 +59,9 @@ weights and biases
 #define CACHE_ALIGN alignas(64)
 
 #ifdef STOCK
-CACHE_ALIGN static input_weight_t input_weights[64*(10*64+1)*256]; //order: [N_inp][N_out]
+CACHE_ALIGN static input_weight_t input_weights[N_K_INDICES*(10*64+1)*256]; //order: [N_inp][N_out]
 #else
-CACHE_ALIGN static input_weight_t input_weights[32*(12*64)*256];   //order: [N_inp][N_out]
+CACHE_ALIGN static input_weight_t input_weights[N_K_INDICES*(12*64+0)*256]; //order: [N_inp][N_out]
 #endif
 CACHE_ALIGN static input_weight_t input_biases[256];
 
@@ -112,10 +112,10 @@ uint32_t piece_map[2][14] = {
 };
 
 //add/subtract influence of input node
-#define INFLUENCE(op) {                                           \
+#define INFLUENCE(op,kidx_) {                                     \
   if(flip_rank) sq = sq ^ 0x3f;                                   \
   input_weight_t* const pinp = input_weights +                    \
-        (kidx * 641 + (piece_map[side][pc]*64+1) + sq) * 256;     \
+        ((kidx_)*641 + (piece_map[side][pc]*64+1) + sq) * 256;    \
   op##Vectors<256,input_weight_t>(accumulation,pinp);             \
 }
 
@@ -134,7 +134,7 @@ uint32_t piece_map[2][14] = {
 #define INVERT(x)        (((x) > 6) ? ((x) - 6) : ((x) + 6))
 
 //add/subtract influence of input node
-#define INFLUENCE(op) {                                           \
+#define INFLUENCE(op,kidx_) {                                     \
   if(flip_rank) {                                                 \
       sq = MIRRORR64(sq);                                         \
       pc = INVERT(pc);                                            \
@@ -143,11 +143,19 @@ uint32_t piece_map[2][14] = {
       sq = MIRRORF64(sq);                                         \
   }                                                               \
   input_weight_t* const pinp = input_weights +                    \
-                (kidx*(12*64) + (pc-1)*64 + sq) * 256;            \
+                ((kidx_)*768 + (pc-1)*64 + sq) * 256;             \
   op##Vectors<256,input_weight_t>(accumulation,pinp);             \
 }
 
 //compute king index (0 to 31)
+#if N_K_INDICES==32
+    #define DEFKIDX const unsigned kidx = (r * 4 + (f - 4));
+#elif N_K_INDICES==1
+    #define DEFKIDX const unsigned kidx = 0;
+#else
+    #define DEFKIDX const unsigned kidx = KINDEX[(r * 4 + (f - 4))];
+#endif
+
 #define KINDEX()                                                  \
     const bool flip_rank = (side == 1);                           \
     const unsigned ksq = pos->squares[side];                      \
@@ -156,8 +164,38 @@ uint32_t piece_map[2][14] = {
     const bool flip_file = (f < 4);                               \
     if(flip_rank) r = 7 - r;                                      \
     if(flip_file) f = 7 - f;                                      \
-    const unsigned kidx = (r * 4 + (f - 4));
+    DEFKIDX
 
+static const unsigned KINDEX[] = {
+#if N_K_INDICES==16
+    0,  1,  2,  3,
+    4,  5,  6,  7,
+    8,  8,  9,  9,
+   10, 10, 11, 11,
+   12, 12, 13, 13,
+   12, 12, 13, 13,
+   14, 14, 15, 15,
+   14, 14, 15, 15
+#elif N_K_INDICES==8
+    0,  1,  2,  3,
+    4,  4,  5,  5,
+    6,  6,  6,  6,
+    7,  7,  7,  7,
+    7,  7,  7,  7,
+    7,  7,  7,  7,
+    7,  7,  7,  7,
+    7,  7,  7,  7
+#elif N_K_INDICES==4
+    0,  0,  1,  1,
+    2,  2,  2,  2,
+    3,  3,  3,  3,
+    3,  3,  3,  3,
+    3,  3,  3,  3,
+    3,  3,  3,  3,
+    3,  3,  3,  3,
+    3,  3,  3,  3
+#endif
+};
 #endif //STOCK
 
 /*
@@ -179,7 +217,7 @@ INLINE void recalculate_accumulator(int side, input_weight_t* const accumulation
     for(unsigned i = 0, pc; (pc = pos->pieces[i]) != 0; i++) {
 #endif
         unsigned sq = pos->squares[i];
-        INFLUENCE(add);
+        INFLUENCE(add,kidx);
     }
 }
 /*
@@ -203,14 +241,14 @@ INLINE void update_accumulator(int side, input_weight_t* const accumulation,
 #endif
       sq = dp->from[i];
       if (sq != 64) {
-        INFLUENCE(sub);
+        INFLUENCE(sub,kidx);
       }
 
       //add to piece
       pc = dp->pc[i];
       sq = dp->to[i];
       if (sq != 64) {
-        INFLUENCE(add);
+        INFLUENCE(add,kidx);
       }
     }
 }
@@ -392,7 +430,7 @@ static bool read_network(FILE* f)
     //read input weights and biases
     for(int i = 0; i < 256; i++)
         input_biases[i] = read_bytes(sizeof(uint16_t), f);
-    for(int i = 0; i < 64 * 641 * 256; i++)
+    for(int i = 0; i < N_K_INDICES * 641 * 256; i++)
         input_weights[i] = read_bytes(sizeof(uint16_t), f);
 
     //-------- dense network 512x32x32x1 ----------
@@ -434,7 +472,7 @@ static bool read_network(FILE* f)
 
     //input layer
     for(int sq = 0; sq < 64; sq++) {
-        for(int kidx = 0; kidx < 32; kidx++) {
+        for(int kidx = 0; kidx < N_K_INDICES; kidx++) {
             for(int pc = 0; pc < 12; pc++) {
                 for(int o = 0; o < 256; o++) {
                     float value = read_bytes(sizeof(float), f) * SCALE_BIAS;
