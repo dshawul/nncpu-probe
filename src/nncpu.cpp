@@ -148,14 +148,6 @@ uint32_t piece_map[2][14] = {
 }
 
 //compute king index (0 to 31)
-#if N_K_INDICES==32
-    #define DEFKIDX const unsigned kidx = (r * 4 + (f - 4));
-#elif N_K_INDICES==1
-    #define DEFKIDX const unsigned kidx = 0;
-#else
-    #define DEFKIDX const unsigned kidx = KINDEX[(r * 4 + (f - 4))];
-#endif
-
 #define KINDEX()                                                  \
     const bool flip_rank = (side == 1);                           \
     const unsigned ksq = pos->squares[side];                      \
@@ -164,10 +156,19 @@ uint32_t piece_map[2][14] = {
     const bool flip_file = (f < 4);                               \
     if(flip_rank) r = 7 - r;                                      \
     if(flip_file) f = 7 - f;                                      \
-    DEFKIDX
+    const unsigned kidx = KINDEX[(r * 4 + (f - 4))];
 
 static const unsigned KINDEX[] = {
-#if N_K_INDICES==16
+#if N_K_INDICES==32
+    0,  1,  2,  3,
+    4,  5,  6,  7,
+    8,  9, 10, 11,
+   12, 13, 14, 15,
+   16, 17, 18, 19,
+   20, 21, 22, 23,
+   24, 25, 26, 27,
+   28, 29, 30, 31
+#elif N_K_INDICES==16
     0,  1,  2,  3,
     4,  5,  6,  7,
     8,  8,  9,  9,
@@ -194,6 +195,24 @@ static const unsigned KINDEX[] = {
     3,  3,  3,  3,
     3,  3,  3,  3,
     3,  3,  3,  3
+#elif N_K_INDICES==2
+    0,  0,  0,  0,
+    1,  1,  1,  1,
+    1,  1,  1,  1,
+    1,  1,  1,  1,
+    1,  1,  1,  1,
+    1,  1,  1,  1,
+    1,  1,  1,  1,
+    1,  1,  1,  1
+#elif N_K_INDICES==1
+    0,  0,  0,  0,
+    0,  0,  0,  0,
+    0,  0,  0,  0,
+    0,  0,  0,  0,
+    0,  0,  0,  0,
+    0,  0,  0,  0,
+    0,  0,  0,  0,
+    0,  0,  0,  0
 #endif
 };
 #endif //STOCK
