@@ -399,7 +399,6 @@ DLLExport int _CDECL nncpu_evaluate_fen(const char* fen)
 /*
 Read bytes in little endian byte order
 */
-#ifdef STOCK
 static uint32_t read_bytes(int count,FILE* f) {
     uint32_t x = 0;
     uint8_t* c = (uint8_t*) &x;
@@ -407,18 +406,18 @@ static uint32_t read_bytes(int count,FILE* f) {
         c[i] = ((uint8_t) fgetc(f));
     return x;
 }
-static void skip_bytes(int count,FILE* f) {
-    for(int i = 0; i < count; i++)
-        fgetc(f);
-}
-#else
-static float read_bytes(int count,FILE* f) {
+static float read_bytes_f(int count,FILE* f) {
     uint32_t x = 0;
     uint8_t* c = (uint8_t*) &x;
     for(int i = 0; i < count; i++)
         c[i] = ((uint8_t) fgetc(f));
     float* p = (float*) &x;
     return *p;
+}
+#ifdef STOCK
+static void skip_bytes(int count,FILE* f) {
+    for(int i = 0; i < count; i++)
+        fgetc(f);
 }
 #endif
 /*
@@ -486,15 +485,18 @@ static bool read_network(FILE* f)
 #else
 static bool read_network(FILE* f)
 {
+
     //version number
-    read_bytes(sizeof(int),f);
+    uint32_t ver;
+    ver = read_bytes(sizeof(uint32_t),f);
+    if(ver != 0x00000000) return false;
 
     //input layer
     for(int sq = 0; sq < 64; sq++) {
         for(int kidx = 0; kidx < N_K_INDICES; kidx++) {
             for(int pc = 0; pc < 12; pc++) {
                 for(int o = 0; o < 256; o++) {
-                    float value = read_bytes(sizeof(float), f) * SCALE_BIAS;
+                    float value = read_bytes_f(sizeof(float), f) * SCALE_BIAS;
                     input_weights[kidx*12*64*256 + pc*64*256 + sq*256+o] =
                         (input_weight_t)value;
                 }
@@ -502,43 +504,43 @@ static bool read_network(FILE* f)
         }
     }
     for(int o = 0; o < 256; o++) {
-        float value = read_bytes(sizeof(float), f) * SCALE_BIAS;
+        float value = read_bytes_f(sizeof(float), f) * SCALE_BIAS;
         input_biases[o] = (input_weight_t)value;
     }
 
     //first hidden layer
     for(int i = 0; i < 512; i++) {
         for(int j = 0; j < 32; j++) {
-            float value = read_bytes(sizeof(float), f) * SCALE_WEIGHT;
+            float value = read_bytes_f(sizeof(float), f) * SCALE_WEIGHT;
             hidden1_weights[j*512 + i] = (weight_t)value;
         }
     }
     for(int i = 0; i < 32; i++) {
-        float value = read_bytes(sizeof(float), f) * SCALE_BIAS;
+        float value = read_bytes_f(sizeof(float), f) * SCALE_BIAS;
         hidden1_biases[i] = (bias_t)value;
     }
 
     //second hidden layer
     for(int i = 0; i < 32; i++){
         for(int j = 0; j < 32; j++){
-            float value = read_bytes(sizeof(float), f) * SCALE_WEIGHT;
+            float value = read_bytes_f(sizeof(float), f) * SCALE_WEIGHT;
             hidden2_weights[j*32+i] = (weight_t)value;
         }
     }
     for(int i = 0; i < 32; i++) {
-        float value = read_bytes(sizeof(float), f) * SCALE_BIAS;
+        float value = read_bytes_f(sizeof(float), f) * SCALE_BIAS;
         hidden2_biases[i] = (bias_t)value;
     }
 
     //output layer
     for(int i = 0; i < 32; i++) {
         for(int j =0; j < 1; j++) {
-            float value = read_bytes(sizeof(float), f) * SCALE_WEIGHT;
+            float value = read_bytes_f(sizeof(float), f) * SCALE_WEIGHT;
             output_weights[j*32+i] = (weight_t)value;
         }
     }
     for(int i = 0; i < 1; i++) {
-        float value = read_bytes(sizeof(float), f) * SCALE_BIAS;
+        float value = read_bytes_f(sizeof(float), f) * SCALE_BIAS;
         output_biases[i] = (bias_t)value;
     }
 
