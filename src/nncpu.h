@@ -1,6 +1,15 @@
 #ifndef NNCPU_H
 #define NNCPU_H
 
+#ifndef __cplusplus
+#ifndef _MSC_VER
+#include <stdalign.h>
+#endif
+#endif
+
+/**
+* Calling convention
+*/
 #ifdef __cplusplus
 #   define EXTERNC extern "C"
 #else
