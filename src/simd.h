@@ -290,8 +290,8 @@ INLINE void clamp16to8(const int16_t* p1, int8_t* p2)
   __m256i a0 = a[0];
   __m256i a1 = a[1];
 #else
-  __m256i a0 = _mm256_srai_epi16(a[0], SCALE_WEIGHT_SHIFT);
-  __m256i a1 = _mm256_srai_epi16(a[1], SCALE_WEIGHT_SHIFT);
+  __m256i a0 = _mm256_srai_epi16(a[0], SCALE_WEIGHT_SHIFT - 1);
+  __m256i a1 = _mm256_srai_epi16(a[1], SCALE_WEIGHT_SHIFT - 1);
 #endif
   b[0] =  _mm256_permute4x64_epi64(_mm256_max_epi8(
       _mm256_packs_epi16(a0, a1), zero), control);
@@ -310,7 +310,7 @@ INLINE void clampVector (
 #ifdef STOCK
         p2[i] = clamp(p1[i],0,SCALE_ACT);
 #else
-        p2[i] = clamp((p1[i] >> SCALE_WEIGHT_SHIFT),0,SCALE_ACT);
+        p2[i] = clamp((p1[i] >> SCALE_WEIGHT_SHIFT - 1),0,SCALE_ACT);
 #endif
 #undef clamp
 

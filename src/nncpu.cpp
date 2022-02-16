@@ -496,7 +496,7 @@ static bool read_network(FILE* f)
         for(int kidx = 0; kidx < N_K_INDICES; kidx++) {
             for(int pc = 0; pc < 12; pc++) {
                 for(int o = 0; o < 256; o++) {
-                    float value = read_bytes_f(sizeof(float), f) * SCALE_BIAS;
+                    float value = (read_bytes_f(sizeof(float), f) * SCALE_BIAS) / 2;
                     input_weights[kidx*12*64*256 + pc*64*256 + sq*256+o] =
                         (input_weight_t)value;
                 }
@@ -504,7 +504,7 @@ static bool read_network(FILE* f)
         }
     }
     for(int o = 0; o < 256; o++) {
-        float value = read_bytes_f(sizeof(float), f) * SCALE_BIAS;
+        float value = (read_bytes_f(sizeof(float), f) * SCALE_BIAS) / 2;
         input_biases[o] = (input_weight_t)value;
     }
 
