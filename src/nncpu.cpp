@@ -3,6 +3,12 @@
 #include <string.h>
 #include <stdio.h>
 
+#ifdef STOCK
+#define FT_WIDTH 256
+#else
+#define FT_WIDTH 256
+#endif
+
 #define DLL_EXPORT
 #include "nncpu.h"
 #undef DLL_EXPORT
@@ -59,13 +65,13 @@ weights and biases
 #define CACHE_ALIGN alignas(64)
 
 #ifdef STOCK
-CACHE_ALIGN static input_weight_t input_weights[N_K_INDICES*(10*64+1)*256]; //order: [N_inp][N_out]
+CACHE_ALIGN static input_weight_t input_weights[N_K_INDICES*(10*64+1)*FT_WIDTH]; //order: [N_inp][N_out]
 #else
-CACHE_ALIGN static input_weight_t input_weights[N_K_INDICES*(12*64+0)*256]; //order: [N_inp][N_out]
+CACHE_ALIGN static input_weight_t input_weights[N_K_INDICES*(12*64+0)*FT_WIDTH]; //order: [N_inp][N_out]
 #endif
-CACHE_ALIGN static input_weight_t input_biases[256];
+CACHE_ALIGN static input_weight_t input_biases[FT_WIDTH];
 
-CACHE_ALIGN static weight_t hidden1_weights[32*512];           //order: [N_out][N_inp]
+CACHE_ALIGN static weight_t hidden1_weights[32*2*FT_WIDTH];           //order: [N_out][N_inp]
 CACHE_ALIGN static bias_t hidden1_biases[32];
 
 CACHE_ALIGN static weight_t hidden2_weights[32*32];            //order: [N_out][N_inp]
@@ -115,8 +121,8 @@ uint32_t piece_map[2][14] = {
 #define INFLUENCE(op,kidx_) {                                     \
   if(flip_rank) sq = sq ^ 0x3f;                                   \
   input_weight_t* const pinp = input_weights +                    \
-        ((kidx_)*641 + (piece_map[side][pc]*64+1) + sq) * 256;    \
-  op##Vectors<256,input_weight_t>(accumulation,pinp);             \
+        ((kidx_)*641 + (piece_map[side][pc]*64+1) + sq) * FT_WIDTH;    \
+  op##Vectors<FT_WIDTH,input_weight_t>(accumulation,pinp);             \
 }
 
 //compute king index (0 to 63)
@@ -143,8 +149,8 @@ uint32_t piece_map[2][14] = {
       sq = MIRRORF64(sq);                                         \
   }                                                               \
   input_weight_t* const pinp = input_weights +                    \
-                ((kidx_)*768 + (pc-1)*64 + sq) * 256;             \
-  op##Vectors<256,input_weight_t>(accumulation,pinp);             \
+                ((kidx_)*768 + (pc-1)*64 + sq) * FT_WIDTH;             \
+  op##Vectors<FT_WIDTH,input_weight_t>(accumulation,pinp);             \
 }
 
 //compute king index (0 to 31)
@@ -298,7 +304,7 @@ INLINE void INPUT_LAYER(Position *pos, output_t* const output)
                     recalculate_accumulator(side, accumulator->accumulation[side], pos);
                   } else {
                     memcpy(accumulator->accumulation[side],
-                      pacc->accumulation[side], sizeof(input_weight_t)*256);
+                      pacc->accumulation[side], sizeof(input_weight_t)*FT_WIDTH);
                     update_accumulator(side, accumulator->accumulation[side], pos, dp);
                   }
               }
@@ -309,7 +315,7 @@ INLINE void INPUT_LAYER(Position *pos, output_t* const output)
                     recalculate_accumulator(side, accumulator->accumulation[side], pos);
                   } else {
                     memcpy(accumulator->accumulation[side],
-                      pacc->accumulation[side], sizeof(input_weight_t)*256);
+                      pacc->accumulation[side], sizeof(input_weight_t)*FT_WIDTH);
                     update_accumulator(side, accumulator->accumulation[side], pos, dp);
                     update_accumulator(side, accumulator->accumulation[side], pos, dp2);
                   }
@@ -319,8 +325,8 @@ INLINE void INPUT_LAYER(Position *pos, output_t* const output)
     }
 
     //assing scaled accumulation to output nodes
-    clampVector<256,input_weight_t,output_t>(accumulator->accumulation[pos->player],output);
-    clampVector<256,input_weight_t,output_t>(accumulator->accumulation[1 - pos->player],output + 256);
+    clampVector<FT_WIDTH,input_weight_t,output_t>(accumulator->accumulation[pos->player],output);
+    clampVector<FT_WIDTH,input_weight_t,output_t>(accumulator->accumulation[1 - pos->player],output + FT_WIDTH);
 
     accumulator->computedAccumulation = 1;
 }
@@ -330,7 +336,7 @@ evaluate net
 int nncpu_evaluate_pos(Position* pos)
 {
     //output_t
-    CACHE_ALIGN output_t input_output[2*256];
+    CACHE_ALIGN output_t input_output[2*FT_WIDTH];
     CACHE_ALIGN output_t hidden1_output[32];
     CACHE_ALIGN output_t hidden2_output[32];
     CACHE_ALIGN bias_t temp[32];
@@ -340,7 +346,7 @@ int nncpu_evaluate_pos(Position* pos)
     INPUT_LAYER(pos,input_output);
 
     //three dense layers
-    DENSE<512,32>(input_output,hidden1_weights,hidden1_biases,temp);
+    DENSE<2*FT_WIDTH,32>(input_output,hidden1_weights,hidden1_biases,temp);
     clampVector<32,bias_t,output_t>(temp,hidden1_output);
     DENSE<32,32>(hidden1_output,hidden2_weights,hidden2_biases,temp);
     clampVector<32,bias_t,output_t>(temp,hidden2_output);
@@ -446,9 +452,9 @@ static bool read_network(FILE* f)
     if(val != 0x5d69d7b8) return false;
 
     //read input weights and biases
-    for(int i = 0; i < 256; i++)
+    for(int i = 0; i < FT_WIDTH; i++)
         input_biases[i] = read_bytes(sizeof(uint16_t), f);
-    for(int i = 0; i < N_K_INDICES * 641 * 256; i++)
+    for(int i = 0; i < N_K_INDICES * 641 * FT_WIDTH; i++)
         input_weights[i] = read_bytes(sizeof(uint16_t), f);
 
     //-------- dense network 512x32x32x1 ----------
@@ -495,24 +501,24 @@ static bool read_network(FILE* f)
     for(int sq = 0; sq < 64; sq++) {
         for(int kidx = 0; kidx < N_K_INDICES; kidx++) {
             for(int pc = 0; pc < 12; pc++) {
-                for(int o = 0; o < 256; o++) {
+                for(int o = 0; o < FT_WIDTH; o++) {
                     float value = (read_bytes_f(sizeof(float), f) * SCALE_BIAS) / 2;
-                    input_weights[kidx*12*64*256 + pc*64*256 + sq*256+o] =
+                    input_weights[kidx*12*64*FT_WIDTH + pc*64*FT_WIDTH + sq*FT_WIDTH+o] =
                         (input_weight_t)value;
                 }
             }
         }
     }
-    for(int o = 0; o < 256; o++) {
+    for(int o = 0; o < FT_WIDTH; o++) {
         float value = (read_bytes_f(sizeof(float), f) * SCALE_BIAS) / 2;
         input_biases[o] = (input_weight_t)value;
     }
 
     //first hidden layer
-    for(int i = 0; i < 512; i++) {
+    for(int i = 0; i < 2*FT_WIDTH; i++) {
         for(int j = 0; j < 32; j++) {
             float value = read_bytes_f(sizeof(float), f) * SCALE_WEIGHT;
-            hidden1_weights[j*512 + i] = (weight_t)value;
+            hidden1_weights[j*(2*FT_WIDTH) + i] = (weight_t)value;
         }
     }
     for(int i = 0; i < 32; i++) {

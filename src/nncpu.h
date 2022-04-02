@@ -56,9 +56,9 @@ typedef struct DirtyPiece {
 
 typedef struct Accumulator {
 #if defined(USE_FLOAT)
-  alignas(64) float accumulation[2][256];
+  alignas(64) float accumulation[2][FT_WIDTH];
 #else
-  alignas(64) int16_t accumulation[2][256];
+  alignas(64) int16_t accumulation[2][FT_WIDTH];
 #endif
   int computedAccumulation;
 } Accumulator;
